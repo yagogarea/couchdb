@@ -165,7 +165,9 @@ is_compacting([_ | _] = FilePath) ->
     ).
 
 init(FilePath, Options) ->
-    {ok, Fd} = open_db_file(FilePath, Options),
+    % couch_file closes itself when nothing monitors it, so hold the open
+    % monitor until init_state/4 sets up fd_monitor.
+    {ok, Fd, OpenRef} = open_db_file(FilePath, Options),
     Header =
         case lists:member(create, Options) of
             true ->
@@ -185,7 +187,9 @@ init(FilePath, Options) ->
                         Header0
                 end
         end,
-    {ok, init_state(FilePath, Fd, Header, Options)}.
+    St = init_state(FilePath, Fd, Header, Options),
+    demonitor(OpenRef, [flush]),
+    {ok, St}.
 
 terminate(_Reason, St) ->
     % If the reason we died is because our fd disappeared
@@ -817,19 +821,19 @@ copy_props(#st{} = St, Props) ->
     {ok, set_header_term(St, ?PROPS_PTR, Props)}.
 
 open_db_file(FilePath, Options) ->
-    case couch_file:open(FilePath, Options) of
-        {ok, Fd} ->
-            {ok, Fd};
+    case couch_file:open_monitor(FilePath, Options) of
+        {ok, _Fd, _MonRef} = Ok ->
+            Ok;
         {error, enoent} ->
             % Couldn't find file. is there a compact version? This ca
             % happen (rarely) if we crashed during the file switch.
-            case couch_file:open(FilePath ++ ".compact", [nologifmissing]) of
-                {ok, Fd} ->
+            case couch_file:open_monitor(FilePath ++ ".compact", [nologifmissing]) of
+                {ok, Fd, _MonRef} = Ok ->
                     Fmt = "Recovering from compaction file: ~s~s",
                     couch_log:info(Fmt, [FilePath, ".compact"]),
                     ok = file:rename(FilePath ++ ".compact", FilePath),
                     ok = couch_file:sync(Fd),
-                    {ok, Fd};
+                    Ok;
                 {error, enoent} ->
                     throw({not_found, no_db_file})
             end;

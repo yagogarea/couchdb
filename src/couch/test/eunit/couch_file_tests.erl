@@ -155,6 +155,8 @@ read_write_test_() ->
                     ?TDEF_FE(should_apply_overwrite_create_option),
                     ?TDEF_FE(should_error_on_creation_if_exists),
                     ?TDEF_FE(should_close_on_idle),
+                    ?TDEF_FE(should_not_close_on_idle_when_opened_with_monitor),
+                    ?TDEF_FE(should_not_leak_exit_on_open_error),
                     ?TDEF_FE(should_crash_on_unexpected_cast),
                     ?TDEF_FE(should_handle_pread_iolist_upgrade_clause),
                     ?TDEF_FE(should_handle_append_bin_upgrade_clause),
@@ -350,6 +352,49 @@ should_close_on_idle(Fd) ->
         100
     ),
     ?assertNot(is_process_alive(Fd)).
+
+should_not_close_on_idle_when_opened_with_monitor(_) ->
+    {ok, Fd, Ref} = couch_file:open_monitor(?tempfile(), [create, overwrite]),
+    Fd ! maybe_close,
+    ?assertEqual(ok, couch_file:sync(Fd)),
+    ?assert(is_process_alive(Fd)),
+    demonitor(Ref, [flush]),
+    Fd ! maybe_close,
+    test_util:wait(
+        fun() ->
+            case is_process_alive(Fd) of
+                true -> wait;
+                false -> ok
+            end
+        end,
+        5000,
+        100
+    ),
+    ?assertNot(is_process_alive(Fd)).
+
+should_not_leak_exit_on_open_error(_) ->
+    lists:foreach(
+        fun(Open) ->
+            {Pid, Ref} = spawn_monitor(fun() ->
+                process_flag(trap_exit, true),
+                Res = couch_file:Open("not a real file", [nologifmissing]),
+                Leaked =
+                    receive
+                        Msg -> {leaked, Msg}
+                    after 0 -> none
+                    end,
+                exit({Res, Leaked})
+            end),
+            receive
+                {'DOWN', Ref, process, Pid, Reason} ->
+                    ?assertEqual({{error, enoent}, none}, Reason)
+            after 5000 ->
+                exit(Pid, kill),
+                error({timeout, Open})
+            end
+        end,
+        [open, open_monitor]
+    ).
 
 should_crash_on_unexpected_cast(Fd) ->
     % Crash a newly opened one as Fd is linked to the test process

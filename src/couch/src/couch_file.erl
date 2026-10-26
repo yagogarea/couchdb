@@ -40,7 +40,7 @@
 }).
 
 % public API
--export([open/1, open/2, close/1, bytes/1, sync/1, truncate/2, set_db_pid/2]).
+-export([open/1, open/2, open_monitor/2, close/1, bytes/1, sync/1, truncate/2, set_db_pid/2]).
 -export([pread_term/2, pread_binary/2]).
 -export([append_binary/2]).
 -export([append_raw_chunk/2, assemble_file_chunk_and_checksum/1]).
@@ -68,27 +68,31 @@ open(Filepath) ->
     open(Filepath, []).
 
 open(Filepath, Options) ->
+    start(start_link, Filepath, Options, []).
+
+open_monitor(Filepath, Options) ->
+    case start(start_monitor, Filepath, Options, [{spawn_opt, [link]}]) of
+        {ok, {Fd, MonRef}} ->
+            {ok, Fd, MonRef};
+        Error ->
+            Error
+    end.
+
+start(Start, Filepath, Options, StartOpts) ->
     case
-        gen_server:start_link(
+        gen_server:Start(
             couch_file,
             {Filepath, Options, self(), Ref = make_ref()},
-            []
+            StartOpts
         )
     of
-        {ok, Fd} ->
-            {ok, Fd};
+        {ok, _} = Ok ->
+            Ok;
         ignore ->
             % get the error
             receive
-                {Ref, Pid, {error, Reason} = Error} ->
-                    case process_info(self(), trap_exit) of
-                        {trap_exit, true} ->
-                            receive
-                                {'EXIT', Pid, _} -> ok
-                            end;
-                        {trap_exit, false} ->
-                            ok
-                    end,
+                {Ref, _Pid, {error, Reason} = Error} ->
+                    % proc_lib already unlinked and flushed any 'EXIT' message
                     case {lists:member(nologifmissing, Options), Reason} of
                         {true, enoent} ->
                             ok;
